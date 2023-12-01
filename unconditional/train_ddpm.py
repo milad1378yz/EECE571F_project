@@ -1,4 +1,5 @@
 import os
+import argparse
 from PIL import Image
 from pathlib import Path
 
@@ -14,81 +15,6 @@ from tqdm.auto import tqdm
 import torch
 from torchvision import transforms
 import torch.nn.functional as F
-
-
-# Loading the dataset
-dataset = load_dataset("./", data_dir="../data/Brain/train/",split="train")
-
-
-# Training config
-@dataclass
-class TrainingConfig:
-    image_size = 128  # the generated image resolution
-    train_batch_size = 16
-    eval_batch_size = 16  # how many images to sample during evaluation
-    num_epochs = 100
-    gradient_accumulation_steps = 1
-    learning_rate = 1e-4
-    lr_warmup_steps = 500
-    save_image_epochs = 10
-    save_model_epochs = 30
-    mixed_precision = "fp16"  # `no` for float32, `fp16` for automatic mixed precision
-    output_dir = "results/"  # the model name locally and on the HF Hub
-
-    push_to_hub = False  # whether to upload the saved model to the HF Hub
-    # hub_model_id = "<your-username>/<my-awesome-model>"  # the name of the repository to create on the HF Hub
-    # hub_private_repo = False
-    overwrite_output_dir = True  # overwrite the old model when re-running the notebook
-    seed = 0
-config = TrainingConfig()
-
-
-# Setting the transforms
-preprocess = transforms.Compose(
-    [
-        transforms.Resize((config.image_size, config.image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ]
-)
-
-def transform(examples):
-    images = [preprocess(image.convert("RGB")) for image in examples["image"]]
-    return {"images": images}
-
-dataset.set_transform(transform)
-
-
-# Dataloader
-train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_batch_size, shuffle=True)
-
-
-# Model
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-model = UNet2DModel(
-    sample_size=config.image_size,  # the target image resolution
-    in_channels=3,  # the number of input channels, 3 for RGB images
-    out_channels=3,  # the number of output channels
-    layers_per_block=2,  # how many ResNet layers to use per UNet block
-    block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channels for each UNet block
-    down_block_types=(
-        "DownBlock2D",  # a regular ResNet downsampling block
-        "DownBlock2D",
-        "DownBlock2D",
-        "DownBlock2D",
-        "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
-        "DownBlock2D",
-    ),
-    up_block_types=(
-        "UpBlock2D",  # a regular ResNet upsampling block
-        "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-    ),
-).to(device)
 
 
 # Evaluation function
@@ -193,14 +119,207 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                     pipeline.save_pretrained(config.output_dir)
 
 
+def parse_args(input_args=None):
+    parser = argparse.ArgumentParser(description="Simple example of a uncoditional training script.")
 
-# Training the model 
-noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
-optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
-lr_scheduler = get_cosine_schedule_with_warmup(
-    optimizer=optimizer,
-    num_warmup_steps=config.lr_warmup_steps,
-    num_training_steps=(len(train_dataloader) * config.num_epochs),
-)
+    '''
+    parser.add_argument(
+        "--pretrained_model_name_or_path",
+        type=str,
+        default=None,
+        required=True,
+        help="Path to pretrained model or model identifier from huggingface.co/models.",
+    )
+    '''
+    
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="controlnet-model",
+        help="The output directory where the model predictions and checkpoints will be written.",
+    )
 
-train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler)
+    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        default=128,
+        help=(
+            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
+            " resolution"
+        ),
+    )
+
+    parser.add_argument(
+        "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
+    )
+
+    parser.add_argument("--num_train_epochs", type=int, default=150)
+
+    parser.add_argument(
+        "--valid_batch_size", type=int, default=4, help="Batch size (per device) for the validation dataloader."
+    )
+    
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=5e-6,
+        help="Initial learning rate (after the potential warmup period) to use.",
+    )
+
+    parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default="constant",
+        help=(
+            'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
+            ' "constant", "constant_with_warmup"]'
+        ),
+    )
+
+    parser.add_argument(
+        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+    )
+
+    parser.add_argument(
+        "--mixed_precision",
+        type=str,
+        default=None,
+        choices=["no", "fp16", "bf16"],
+        help=(
+            "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
+            " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
+            " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
+        ),
+    )
+    
+    parser.add_argument(
+        "--dataset_dir",
+        type=str,
+        default=None,
+        help=(
+            "The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private,"
+            " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
+            " or to a folder containing files that 🤗 Datasets can understand."
+        ),
+    )
+
+    parser.add_argument(
+        "--save_image_epochs",
+        type=int,
+        default=15,
+        help=(
+            "Dummy save image epochs!"
+        ),
+    )
+
+    parser.add_argument(
+        "--save_model_epochs",
+        type=int,
+        default=15,
+        help=(
+            "Dummy save model epochs!"
+        ),
+    )
+    
+    if input_args is not None:
+        args = parser.parse_args(input_args)
+    else:
+        args = parser.parse_args()
+
+    return args
+
+def main(args):
+    # Loading the dataset
+    #dataset = load_dataset("./", data_dir="../data/Brain/train/",split="train")
+    dataset = load_dataset("./", data_dir=args.dataset_dir, split="train")
+
+    # Training config
+    @dataclass
+    class TrainingConfig:
+        image_size = args.image_size  # the generated image resolution
+        train_batch_size = args.train_batch_size
+        eval_batch_size = args.valid_batch_size  # how many images to sample during evaluation
+        num_epochs = args.num_train_epochs
+        gradient_accumulation_steps = args.gradient_accumulation_steps
+        learning_rate = args.learning_rate
+        lr_warmup_steps = args.lr_warmup_steps
+        save_image_epochs = args.save_image_epochs
+        save_model_epochs = args.save_model_epochs
+        mixed_precision = args.mixed_precision  # `no` for float32, `fp16` for automatic mixed precision
+        output_dir = args.output_dir  # the model name locally and on the HF Hub
+        overwrite_output_dir = True  # overwrite the old model when re-running the notebook
+        seed = args.seed
+        push_to_hub = False
+    config = TrainingConfig()
+
+    # Setting the transforms
+    preprocess = transforms.Compose(
+        [
+            transforms.Resize((config.image_size, config.image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),
+        ]
+    )
+
+    def transform(examples):
+        images = [preprocess(image.convert("RGB")) for image in examples["image"]]
+        return {"images": images}
+
+    dataset.set_transform(transform)
+
+    # Dataloader
+    train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_batch_size, shuffle=True)
+
+    # Model
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    model = UNet2DModel(
+        sample_size=config.image_size,  # the target image resolution
+        in_channels=3,  # the number of input channels, 3 for RGB images
+        out_channels=3,  # the number of output channels
+        layers_per_block=2,  # how many ResNet layers to use per UNet block
+        block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channels for each UNet block
+        down_block_types=(
+            "DownBlock2D",  # a regular ResNet downsampling block
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
+            "DownBlock2D",
+        ),
+        up_block_types=(
+            "UpBlock2D",  # a regular ResNet upsampling block
+            "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        ),
+    ).to(device)
+
+    # Training the model 
+    noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=config.lr_warmup_steps,
+        num_training_steps=(len(train_dataloader) * config.num_epochs),
+    )
+
+    train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler)
+
+    return
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    main(args)
