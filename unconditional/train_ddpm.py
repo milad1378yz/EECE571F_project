@@ -116,7 +116,9 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                         ignore_patterns=["step_*", "epoch_*"],
                     )
                 else:
-                    pipeline.save_pretrained(config.output_dir)
+                    test_dir = os.path.join(config.output_dir, "checkpoints", f"{epoch:04d}")
+                    os.makedirs(test_dir, exist_ok=True)
+                    pipeline.save_pretrained(test_dir)
 
 
 def parse_args(input_args=None):
